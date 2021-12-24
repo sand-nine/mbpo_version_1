@@ -70,3 +70,4 @@ If you would like to compare to MBPO but do not have the resources to re-run all
 The underlying soft actor-critic implementation in MBPO comes from [Tuomas Haarnoja](https://scholar.google.com/citations?user=VT7peyEAAAAJ&hl=en) and [Kristian Hartikainen's](https://hartikainen.github.io/) [softlearning](https://github.com/rail-berkeley/softlearning) codebase. The modeling code is a slightly modified version of [Kurtland Chua's](https://kchua.github.io/) [PETS](https://github.com/kchua/handful-of-trials) implementation.
 
 
+# mbpo
