@@ -20,7 +20,6 @@ from mbpo.utils.logging import Progress, Silent
 
 np.set_printoptions(precision=5)
 
-import matplotlib.pyplot as plt 
 
 class BNN:
     """Neural network models which model aleatoric uncertainty (and possibly epistemic uncertainty
@@ -45,10 +44,6 @@ class BNN:
         self.name = get_required_argument(params, 'name', 'Must provide name.')
         self.model_dir = params.get('model_dir', None)
 
-        self.epoch_sum = 0
-        self.x_dot = []
-        self.y_dot = []
-
         print('[ BNN ] Initializing model: {} | {} networks | {} elites'.format(params['name'], params['num_networks'], params['num_elites']))
         if params.get('sess', None) is None:
             config = tf.ConfigProto()
@@ -60,9 +55,6 @@ class BNN:
         # Instance variables
         self.finalized = False
         self.layers, self.max_logvar, self.min_logvar = [], None, None
-        #---------------------------------------
-        self.layers_twin = []
-        #---------------------------------------
         self.decays, self.optvars, self.nonoptvars = [], [], []
         self.end_act, self.end_act_name = None, None
         self.scaler = None
@@ -70,12 +62,8 @@ class BNN:
         # Training objects
         self.optimizer = None
         self.sy_train_in, self.sy_train_targ = None, None
-        
         self.train_op, self.mse_loss = None, None
-        #---------------------------------------
-        self.sy_train_in_twin = None
-        self.mse_loss_twin = None
-        #---------------------------------------
+
         # Prediction objects
         self.sy_pred_in2d, self.sy_pred_mean2d_fac, self.sy_pred_var2d_fac = None, None, None
         self.sy_pred_mean2d, self.sy_pred_var2d = None, None
@@ -86,16 +74,10 @@ class BNN:
                 raise ValueError("Cannot load model without providing model directory.")
             self._load_structure()
             self.num_nets, self.model_loaded = self.layers[0].get_ensemble_size(), True
-            #---------------------------------------
-            self.num_nets_twin = self.layers_twin[0].get_ensemble_size()
-            #---------------------------------------
             print("Model loaded from %s." % self.model_dir)
             self.num_elites = params['num_elites']
         else:
             self.num_nets = params.get('num_networks', 1)
-            #---------------------------------------
-            self.num_nets_twin = params.get('num_networks', 1)
-            #---------------------------------------
             self.num_elites = params['num_elites'] #params.get('num_elites', 1)
             self.model_loaded = False
 
@@ -140,20 +122,6 @@ class BNN:
         if len(self.layers) > 0:
             layer.set_input_dim(self.layers[-1].get_output_dim())
         self.layers.append(layer.copy())
-    
-    def add_twin(self, layer):
-
-        if self.finalized:
-            raise RuntimeError("Cannot modify network structure after finalizing.")
-        if len(self.layers_twin) == 0 and layer.get_input_dim() is None:
-            raise ValueError("Must set input dimension for the first layer.")
-        if self.model_loaded:
-            raise RuntimeError("Cannot add layers to a loaded model.")
-
-        layer.set_ensemble_size(self.num_nets_twin)
-        if len(self.layers_twin) > 0:
-            layer.set_input_dim(self.layers_twin[-1].get_output_dim())
-        self.layers_twin.append(layer.copy())
 
     def pop(self):
         """Removes and returns the most recently added layer to the network.
@@ -187,17 +155,12 @@ class BNN:
         self.optimizer = optimizer(**optimizer_args)
 
         # Add variance output.
-        
         self.layers[-1].set_output_dim(2 * self.layers[-1].get_output_dim())
-        self.layers_twin[-1].set_output_dim(2 * self.layers_twin[-1].get_output_dim())
 
         # Remove last activation to isolate variance from activation function.
         self.end_act = self.layers[-1].get_activation()
         self.end_act_name = self.layers[-1].get_activation(as_func=False)
         self.layers[-1].unset_activation()
-        self.end_act_twin = self.layers_twin[-1].get_activation()
-        self.end_act_name_twin = self.layers_twin[-1].get_activation(as_func=False)
-        self.layers_twin[-1].unset_activation()
 
         # Construct all variables.
         with self.sess.as_default():
@@ -212,53 +175,23 @@ class BNN:
                         layer.construct_vars()
                         self.decays.extend(layer.get_decays())
                         self.optvars.extend(layer.get_vars())
-                #---------------------------------------
-                self.scaler_twin = TensorStandardScaler(self.layers_twin[0].get_input_dim(),"twin")
-                self.max_logvar_twin = tf.Variable(np.ones([1, self.layers_twin[-1].get_output_dim() // 2])/2., dtype=tf.float32,
-                                              name="max_log_var_twin")
-                self.min_logvar_twin = tf.Variable(-np.ones([1, self.layers_twin[-1].get_output_dim() // 2])*10., dtype=tf.float32,
-                                              name="min_log_var_twin")
-                for i, layer in enumerate(self.layers_twin):
-                    with tf.variable_scope("Layer_twin%i" % i):
-                        layer.construct_vars()
-                        self.decays.extend(layer.get_decays())
-                        self.optvars.extend(layer.get_vars())
-                #---------------------------------------
-        #---------------------------------------
-        self.optvars.extend([self.max_logvar, self.min_logvar,self.max_logvar_twin,self.min_logvar_twin])
-        #---------------------------------------
+        self.optvars.extend([self.max_logvar, self.min_logvar])
         self.nonoptvars.extend(self.scaler.get_vars())
-        #---------------------------------------
-        self.nonoptvars.extend(self.scaler_twin.get_vars())
-        #---------------------------------------
+
         # Set up training
         with tf.variable_scope(self.name):
             self.optimizer = optimizer(**optimizer_args)
             self.sy_train_in = tf.placeholder(dtype=tf.float32,
                                               shape=[self.num_nets, None, self.layers[0].get_input_dim()],
                                               name="training_inputs")
-            #---------------------------------------
-            self.sy_train_in_twin = tf.placeholder(dtype=tf.float32,
-                                                   shape=[self.num_nets_twin, None, self.layers_twin[0].get_input_dim()],
-                                                   name="training_inputs_twin")
-            
-            #---------------------------------------
             self.sy_train_targ = tf.placeholder(dtype=tf.float32,
                                                 shape=[self.num_nets, None, self.layers[-1].get_output_dim() // 2],
                                                 name="training_targets")
-            train_loss = tf.reduce_sum(self._compile_losses(self.sy_train_in, self.sy_train_in_twin, self.sy_train_targ, inc_var_loss=True))
-            #---------------------------------------
-            train_loss += tf.reduce_sum(self._compile_losses_twin(self.sy_train_in, self.sy_train_in_twin, self.sy_train_targ, inc_var_loss=True))
-            #---------------------------------------
+            train_loss = tf.reduce_sum(self._compile_losses(self.sy_train_in, self.sy_train_targ, inc_var_loss=True))
             train_loss += tf.add_n(self.decays)
             train_loss += 0.01 * tf.reduce_sum(self.max_logvar) - 0.01 * tf.reduce_sum(self.min_logvar)
-            #---------------------------------------
-            train_loss += 0.01 * tf.reduce_sum(self.max_logvar_twin) - 0.01 * tf.reduce_sum(self.min_logvar_twin)
-            #---------------------------------------
-            self.mse_loss = self._compile_losses(self.sy_train_in, self.sy_train_in_twin, self.sy_train_targ, inc_var_loss=False)
-            #---------------------------------------
-            self.mse_loss += self._compile_losses_twin(self.sy_train_in, self.sy_train_in_twin, self.sy_train_targ, inc_var_loss=False)
-            #---------------------------------------
+            self.mse_loss = self._compile_losses(self.sy_train_in, self.sy_train_targ, inc_var_loss=False)
+
             self.train_op = self.optimizer.minimize(train_loss, var_list=self.optvars)
 
         # Initialize all variables
@@ -269,11 +202,9 @@ class BNN:
             self.sy_pred_in2d = tf.placeholder(dtype=tf.float32,
                                                shape=[None, self.layers[0].get_input_dim()],
                                                name="2D_training_inputs")
-            self.sy_pred_in2d_twin = tf.placeholder(dtype=tf.float32,
-                                               shape=[None, self.layers_twin[0].get_input_dim()],
-                                               name="2D_training_inputs")
+            print(self.layers[0].get_input_dim())
             self.sy_pred_mean2d_fac, self.sy_pred_var2d_fac = \
-                self.create_prediction_tensors(self.sy_pred_in2d, self.sy_pred_in2d_twin, factored=True)
+                self.create_prediction_tensors(self.sy_pred_in2d, factored=True)
             self.sy_pred_mean2d = tf.reduce_mean(self.sy_pred_mean2d_fac, axis=0)
             self.sy_pred_var2d = tf.reduce_mean(self.sy_pred_var2d_fac, axis=0) + \
                 tf.reduce_mean(tf.square(self.sy_pred_mean2d_fac - self.sy_pred_mean2d), axis=0)
@@ -281,11 +212,8 @@ class BNN:
             self.sy_pred_in3d = tf.placeholder(dtype=tf.float32,
                                                shape=[self.num_nets, None, self.layers[0].get_input_dim()],
                                                name="3D_training_inputs")
-            self.sy_pred_in3d_twin = tf.placeholder(dtype=tf.float32,
-                                               shape=[self.num_nets, None, self.layers_twin[0].get_input_dim()],
-                                               name="3D_training_inputs")
             self.sy_pred_mean3d_fac, self.sy_pred_var3d_fac = \
-                self.create_prediction_tensors(self.sy_pred_in3d, self.sy_pred_in3d_twin, factored=True)
+                self.create_prediction_tensors(self.sy_pred_in3d, factored=True)
 
         # Load model if needed
         if self.model_loaded:
@@ -329,7 +257,7 @@ class BNN:
         if updated:
             self._epochs_since_update = 0
         else:
-            self._epochs_since_update += 1 
+            self._epochs_since_update += 1
 
         if self._epochs_since_update > self._max_epochs_since_update:
             # print('[ BNN ] Breaking at epoch {}: {} epochs since update ({} max)'.format(epoch, self._epochs_since_update, self._max_epochs_since_update))
@@ -372,10 +300,9 @@ class BNN:
     # Model Methods #
     #################
 
-    def train(self, inputs, inputs_twin, targets,
+    def train(self, inputs, targets,
               batch_size=32, max_epochs=None, max_epochs_since_update=5,
-              hide_progress=False, holdout_ratio=0.0, max_logging=5000, max_grad_updates=None, timer=None, max_t=None,
-              ):
+              hide_progress=False, holdout_ratio=0.0, max_logging=5000, max_grad_updates=None, timer=None, max_t=None):
         """Trains/Continues network training
 
         Arguments:
@@ -398,25 +325,23 @@ class BNN:
 
         # Split into training and holdout sets
         num_holdout = min(int(inputs.shape[0] * holdout_ratio), max_logging)
+        print(num_holdout)
+        print(holdout_ratio)
+        print(inputs.shape)
+        print(targets.shape)
+        #import time
+        #time.sleep(120)
         permutation = np.random.permutation(inputs.shape[0])
         inputs, holdout_inputs = inputs[permutation[num_holdout:]], inputs[permutation[:num_holdout]]
-        #---------------------------------------
-        inputs_twin, holdout_inputs_twin = inputs_twin[permutation[num_holdout:]], inputs_twin[permutation[:num_holdout]]
-        #---------------------------------------
         targets, holdout_targets = targets[permutation[num_holdout:]], targets[permutation[:num_holdout]]
         holdout_inputs = np.tile(holdout_inputs[None], [self.num_nets, 1, 1])
-        holdout_inputs_twin = np.tile(holdout_inputs_twin[None], [self.num_nets_twin, 1, 1])
         holdout_targets = np.tile(holdout_targets[None], [self.num_nets, 1, 1])
 
         print('[ BNN ] Training {} | Holdout: {}'.format(inputs.shape, holdout_inputs.shape))
         with self.sess.as_default():
             self.scaler.fit(inputs)
-            #---------------------------------------
-            self.scaler_twin.fit(inputs_twin)
-            #---------------------------------------
 
         idxs = np.random.randint(inputs.shape[0], size=[self.num_nets, inputs.shape[0]])
-        idxs_twin = np.random.randint(inputs_twin.shape[0], size=[self.num_nets_twin, inputs_twin.shape[0]])
         if hide_progress:
             progress = Silent()
         else:
@@ -433,14 +358,11 @@ class BNN:
         t0 = time.time()
         grad_updates = 0
         for epoch in epoch_iter:
-
             for batch_num in range(int(np.ceil(idxs.shape[-1] / batch_size))):
                 batch_idxs = idxs[:, batch_num * batch_size:(batch_num + 1) * batch_size]
                 self.sess.run(
                     self.train_op,
-                    feed_dict={self.sy_train_in: inputs[batch_idxs], 
-                               self.sy_train_in_twin: inputs_twin[batch_idxs],
-                               self.sy_train_targ: targets[batch_idxs]}
+                    feed_dict={self.sy_train_in: inputs[batch_idxs], self.sy_train_targ: targets[batch_idxs]}
                 )
                 grad_updates += 1
 
@@ -451,7 +373,6 @@ class BNN:
                             self.mse_loss,
                             feed_dict={
                                 self.sy_train_in: inputs[idxs[:, :max_logging]],
-                                self.sy_train_in_twin: inputs_twin[idxs[:, :max_logging]],
                                 self.sy_train_targ: targets[idxs[:, :max_logging]]
                             }
                         )
@@ -462,7 +383,6 @@ class BNN:
                             self.mse_loss,
                             feed_dict={
                                 self.sy_train_in: inputs[idxs[:, :max_logging]],
-                                self.sy_train_in_twin: inputs_twin[idxs[:, :max_logging]],
                                 self.sy_train_targ: targets[idxs[:, :max_logging]]
                             }
                         )
@@ -470,7 +390,6 @@ class BNN:
                             self.mse_loss,
                             feed_dict={
                                 self.sy_train_in: holdout_inputs,
-                                self.sy_train_in_twin: holdout_inputs_twin,
                                 self.sy_train_targ: holdout_targets
                             }
                         )
@@ -480,11 +399,6 @@ class BNN:
                     progress.set_description(named_losses)
 
                     break_train = self._save_best(epoch, holdout_losses)
-
-            #if ( epoch + last_epoch % 250 ) == 0:
-                #print()
-                #print(epoch)
-                #print(last_epoch)
 
             progress.update()
             t = time.time() - t0
@@ -497,15 +411,6 @@ class BNN:
                 # time.sleep(5)
                 break
 
-            self.epoch_sum += 1
-            if (self.epoch_sum % 250 == 0):
-                plt.figure(2)
-                ax1=plt.subplot(211)
-                self.x_dot.append(self.epoch_sum)
-                self.y_dot.append((np.sort(holdout_losses)[:self.num_elites]).mean())
-                plt.plot(self.x_dot,self.y_dot)
-                plt.savefig('train_var_loss.png', bbox_inches='tight')
-
         progress.stamp()
         if timer: timer.stamp('bnn_train')
 
@@ -516,7 +421,6 @@ class BNN:
             self.mse_loss,
             feed_dict={
                 self.sy_train_in: holdout_inputs,
-                self.sy_train_in_twin: holdout_inputs_twin,
                 self.sy_train_targ: holdout_targets
             }
         )
@@ -529,12 +433,12 @@ class BNN:
         val_loss = (np.sort(holdout_losses)[:self.num_elites]).mean()
         model_metrics = {'val_loss': val_loss}
         print('[ BNN ] Holdout', np.sort(holdout_losses), model_metrics)
-        return OrderedDict(model_metrics)#, new_dot_banch
+        return OrderedDict(model_metrics)
         # return np.sort(holdout_losses)[]
 
         # pdb.set_trace()
 
-    def predict(self, inputs, inputs_twin, factored=False, *args, **kwargs):
+    def predict(self, inputs, factored=False, *args, **kwargs):
         """Returns the distribution predicted by the model for each input vector in inputs.
         Behavior is affected by the dimensionality of inputs and factored as follows:
 
@@ -561,27 +465,24 @@ class BNN:
 
                 return self.sess.run(
                     [self.sy_pred_mean2d_fac, self.sy_pred_var2d_fac],
-                    feed_dict={self.sy_pred_in2d: inputs, self.sy_pred_in2d_twin: inputs_twin}
+                    feed_dict={self.sy_pred_in2d: inputs}
                 )
             else:
                 return self.sess.run(
                     [self.sy_pred_mean2d, self.sy_pred_var2d],
-                    feed_dict={self.sy_pred_in2d: inputs, self.sy_pred_in2d_twin: inputs_twin}
+                    feed_dict={self.sy_pred_in2d: inputs}
 
                 )
         else:
             return self.sess.run(
                 [self.sy_pred_mean3d_fac, self.sy_pred_var3d_fac],
-                feed_dict={self.sy_pred_in3d: inputs, self.sy_pred_in3d_twin: inputs_twin}
+                feed_dict={self.sy_pred_in3d: inputs}
             )
 
-    def create_prediction_tensors(self, inputs, inputs_twin, factored=False, *args, **kwargs):
+    def create_prediction_tensors(self, inputs, factored=False, *args, **kwargs):
         """See predict() above for documentation.
         """
         factored_mean, factored_variance = self._compile_outputs(inputs)
-        factored_mean_twin, factored_variance_twin = self._compile_outputs_twin(inputs_twin)
-        factored_mean += factored_mean_twin
-        factored_variance += factored_variance_twin
         if inputs.shape.ndims == 2 and not factored:
             mean = tf.reduce_mean(factored_mean, axis=0)
             variance = tf.reduce_mean(tf.square(factored_mean - mean), axis=0) + \
@@ -653,7 +554,6 @@ class BNN:
             in the ensemble.
         """
         dim_output = self.layers[-1].get_output_dim()
-
         cur_out = self.scaler.transform(inputs)
         for layer in self.layers:
             cur_out = layer.compute_output_tensor(cur_out)
@@ -670,26 +570,7 @@ class BNN:
         else:
             return mean, tf.exp(logvar)
 
-    def _compile_outputs_twin(self, inputs, ret_log_var=False):
-
-        dim_output = self.layers_twin[-1].get_output_dim()
-        cur_out = self.scaler_twin.transform(inputs)
-        for layer in self.layers_twin:
-            cur_out = layer.compute_output_tensor(cur_out)
-
-        mean = cur_out[:, :, :dim_output//2]
-        if self.end_act_twin is not None:
-            mean = self.end_act_twin(mean)
-
-        logvar = self.max_logvar_twin - tf.nn.softplus(self.max_logvar_twin - cur_out[:, :, dim_output//2:])
-        logvar = self.min_logvar_twin + tf.nn.softplus(logvar - self.min_logvar_twin)
-
-        if ret_log_var:
-            return mean, logvar
-        else:
-            return mean, tf.exp(logvar)
-
-    def _compile_losses(self, inputs, inputs_twin, targets, inc_var_loss=True):
+    def _compile_losses(self, inputs, targets, inc_var_loss=True):
         """Helper method for compiling the loss function.
 
         The loss function is obtained from the log likelihood, assuming that the output
@@ -704,27 +585,6 @@ class BNN:
         Returns: (tf.Tensor) A tensor representing the loss on the input arguments.
         """
         mean, log_var = self._compile_outputs(inputs, ret_log_var=True)
-        mean_twin, log_var_twin = self._compile_outputs_twin(inputs_twin, ret_log_var=True)
-        mean = mean + mean_twin
-        log_var = log_var + log_var_twin
-        inv_var = tf.exp(-log_var)
-
-        if inc_var_loss:
-            mse_losses = tf.reduce_mean(tf.reduce_mean(tf.square(mean - targets) * inv_var, axis=-1), axis=-1)
-            var_losses = tf.reduce_mean(tf.reduce_mean(log_var, axis=-1), axis=-1)
-            total_losses = mse_losses + var_losses
-        else:
-            total_losses = tf.reduce_mean(tf.reduce_mean(tf.square(mean - targets), axis=-1), axis=-1)
-
-        return total_losses
-
-    def _compile_losses_twin(self, inputs, inputs_twin, targets, inc_var_loss=True):
-
-        mean, log_var = self._compile_outputs(inputs, ret_log_var=True)
-        mean_twin, log_var_twin = self._compile_outputs_twin(inputs_twin, ret_log_var=True)
-        mean = mean + mean_twin
-        log_var = log_var + log_var_twin
-
         inv_var = tf.exp(-log_var)
 
         if inc_var_loss:

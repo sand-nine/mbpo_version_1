@@ -14,7 +14,7 @@ def get_required_argument(dotmap, key, message, default=None):
 class TensorStandardScaler:
     """Helper class for automatically normalizing inputs into the network.
     """
-    def __init__(self, x_dim):
+    def __init__(self, x_dim, name=""):
         """Initializes a scaler.
 
         Arguments:
@@ -23,7 +23,7 @@ class TensorStandardScaler:
         Returns: None.
         """
         self.fitted = False
-        with tf.variable_scope("Scaler"):
+        with tf.variable_scope("Scaler"+name):
             self.mu = tf.get_variable(
                 name="scaler_mu", shape=[1, x_dim], initializer=tf.constant_initializer(0.0),
                 trainable=False

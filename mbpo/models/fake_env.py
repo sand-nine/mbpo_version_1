@@ -40,7 +40,9 @@ class FakeEnv:
             return_single = False
 
         inputs = np.concatenate((obs, act), axis=-1)
-        ensemble_model_means, ensemble_model_vars = self.model.predict(inputs, factored=True)
+        inputs_twin = obs
+
+        ensemble_model_means, ensemble_model_vars = self.model.predict(inputs, inputs_twin, factored=True)
         ensemble_model_means[:,:,1:] += obs
         ensemble_model_stds = np.sqrt(ensemble_model_vars)
 

@@ -23,6 +23,7 @@ from mbpo.utils.visualization import visualize_policy
 from mbpo.utils.logging import Progress
 import mbpo.utils.filesystem as filesystem
 
+import matplotlib.pyplot as plt
 
 def td_target(reward, discount, next_value):
     return reward + discount * next_value
@@ -64,7 +65,7 @@ class MBPO(RLAlgorithm):
             num_networks=7,
             num_elites=5,
             model_retain_epochs=20,
-            rollout_batch_size=100e3,
+            rollout_batch_size=100000,
             real_ratio=0.1,
             rollout_schedule=[20,100,1,1],
             hidden_dim=200,
@@ -95,15 +96,23 @@ class MBPO(RLAlgorithm):
 
         super(MBPO, self).__init__(**kwargs)
 
+        self.OBS = 0
+        self.x_dot = []
+        self.y_dot1 = []
+        self.y_dot2 = []
+        self.y_dot3 = []
+        self.legend_key = 0
+
         obs_dim = np.prod(training_environment.observation_space.shape)
         act_dim = np.prod(training_environment.action_space.shape)
         self._model = construct_model(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim, num_networks=num_networks, num_elites=num_elites)
+        #self._model_twin = construct_model(obs_dim=obs_dim, act_dim=0, hidden_dim=hidden_dim, num_networks=num_networks, num_elites=num_elites)
         self._static_fns = static_fns
         self.fake_env = FakeEnv(self._model, self._static_fns)
 
         self._rollout_schedule = rollout_schedule
         self._max_model_t = max_model_t
-
+        
         # self._model_pool_size = model_pool_size
         # print('[ MBPO ] Model pool size: {:.2E}'.format(self._model_pool_size))
         # self._model_pool = SimpleReplayPool(pool._observation_space, pool._action_space, self._model_pool_size)
@@ -167,6 +176,8 @@ class MBPO(RLAlgorithm):
 
     def _train(self):
         
+        #plt.figure()
+
         """Return a generator that performs RL training.
 
         Args:
@@ -178,7 +189,7 @@ class MBPO(RLAlgorithm):
         """
         training_environment = self._training_environment
         evaluation_environment = self._evaluation_environment
-        policy = self._policy
+        policy = self._policy                                                                                                            
         pool = self._pool
         model_metrics = {}
 
@@ -220,11 +231,12 @@ class MBPO(RLAlgorithm):
                     print('[ MBPO ] Training model at epoch {} | freq {} | timestep {} (total: {}) | epoch train steps: {} (total: {})'.format(
                         self._epoch, self._model_train_freq, self._timestep, self._total_timestep, self._train_steps_this_epoch, self._num_train_steps)
                     )
-
+                    print("START!!!!!!!!!!!!!!!!!!!")
                     model_train_metrics = self._train_model(batch_size=256, max_epochs=None, holdout_ratio=0.2, max_t=self._max_model_t)
+                    print("ENDING!!!!!!!!!!!!!!!!!!")
                     model_metrics.update(model_train_metrics)
                     gt.stamp('epoch_train_model')
-                    
+
                     self._set_rollout_length()
                     self._reallocate_model_pool()
                     model_rollout_metrics = self._rollout_model(rollout_batch_size=self._rollout_batch_size, deterministic=self._deterministic)
@@ -306,6 +318,20 @@ class MBPO(RLAlgorithm):
                     evaluation_environment, 'render_rollouts'):
                 training_environment.render_rollouts(evaluation_paths)
 
+            self.OBS += self._timestep
+            self.x_dot.append(self.OBS)
+            self.y_dot1.append(diagnostics["Q-avg"])
+            self.y_dot2.append(diagnostics["Q-std"])
+            self.y_dot3.append(diagnostics["Q_loss"])
+            plt.figure(1)
+            plt.plot(self.x_dot,self.y_dot1,label='Q-avg')
+            plt.plot(self.x_dot,self.y_dot2,label='Q-std')
+            plt.plot(self.x_dot,self.y_dot3,label='Q_loss')
+            if (self.legend_key == 0):
+                plt.legend()
+                self.legend_key = 1
+            plt.savefig('Q-avg-std-loss.png', bbox_inches='tight')
+
             yield diagnostics
 
         self.sampler.terminate()
@@ -372,10 +398,11 @@ class MBPO(RLAlgorithm):
             assert self._model_pool.size == new_pool.size
             self._model_pool = new_pool
 
+    
     def _train_model(self, **kwargs):
         env_samples = self._pool.return_all_samples()
-        train_inputs, train_outputs = format_samples_for_training(env_samples)
-        model_metrics = self._model.train(train_inputs, train_outputs, **kwargs)
+        train_inputs, train_inputs_twin, train_outputs = format_samples_for_training(env_samples)
+        model_metrics = self._model.train(train_inputs, train_inputs_twin, train_outputs, **kwargs)
         return model_metrics
 
     def _rollout_model(self, rollout_batch_size, **kwargs):
@@ -406,6 +433,7 @@ class MBPO(RLAlgorithm):
         print('[ Model Rollout ] Added: {:.1e} | Model pool: {:.1e} (max {:.1e}) | Length: {} | Train rep: {}'.format(
             sum(steps_added), self._model_pool.size, self._model_pool._max_size, mean_rollout_length, self._n_train_repeat
         ))
+
         return rollout_stats
 
     def _visualize_model(self, env, timestep):
@@ -539,12 +567,13 @@ class MBPO(RLAlgorithm):
             tf.losses.mean_squared_error(
                 labels=Q_target, predictions=Q_value, weights=0.5)
             for Q_value in Q_values)
-
+        
         self._Q_optimizers = tuple(
             tf.train.AdamOptimizer(
                 learning_rate=self._Q_lr,
                 name='{}_{}_optimizer'.format(Q._name, i)
             ) for i, Q in enumerate(self._Qs))
+
         Q_training_ops = tuple(
             tf.contrib.layers.optimize_loss(
                 Q_loss,
@@ -557,7 +586,8 @@ class MBPO(RLAlgorithm):
                     "loss", "gradients", "gradient_norm", "global_gradient_norm"
                 ) if self._tf_summaries else ()))
             for i, (Q, Q_loss, Q_optimizer)
-            in enumerate(zip(self._Qs, Q_losses, self._Q_optimizers)))
+            in enumerate(zip(self._Qs, Q_losses, self._Q_optimizers))
+        )
 
         self._training_ops.update({'Q': tf.group(Q_training_ops)})
 
@@ -568,8 +598,9 @@ class MBPO(RLAlgorithm):
         policy and entropy with gradient descent, and adds them to
         `self._training_ops` attribute.
         """
-
         actions = self._policy.actions([self._observations_ph])
+        import time as TT
+
         log_pis = self._policy.log_pis([self._observations_ph], actions)
 
         assert log_pis.shape.as_list() == [None, 1]

@@ -14,15 +14,7 @@ def construct_model(obs_dim=11, act_dim=3, rew_dim=1, hidden_dim=200, num_networ
 	model.add(FC(hidden_dim, activation="swish", weight_decay=0.000075))
 	model.add(FC(hidden_dim, activation="swish", weight_decay=0.000075))
 	model.add(FC(obs_dim+rew_dim, weight_decay=0.0001))
-
-	model.add_twin(FC(hidden_dim, input_dim=obs_dim, activation="swish", weight_decay=0.000025))
-	model.add_twin(FC(hidden_dim, activation="swish", weight_decay=0.00005))
-	model.add_twin(FC(hidden_dim, activation="swish", weight_decay=0.000075))
-	model.add_twin(FC(hidden_dim, activation="swish", weight_decay=0.000075))
-	model.add_twin(FC(obs_dim+rew_dim, weight_decay=0.0001))
-
 	model.finalize(tf.train.AdamOptimizer, {"learning_rate": 0.001})
-
 	return model
 
 def format_samples_for_training(samples):
@@ -32,9 +24,8 @@ def format_samples_for_training(samples):
 	rew = samples['rewards']
 	delta_obs = next_obs - obs
 	inputs = np.concatenate((obs, act), axis=-1)
-	inputs_twin = obs
 	outputs = np.concatenate((rew, delta_obs), axis=-1)
-	return inputs, inputs_twin, outputs
+	return inputs, outputs
 
 def reset_model(model):
 	model_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=model.name)
